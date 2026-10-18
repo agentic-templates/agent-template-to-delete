@@ -196,17 +196,22 @@ print_state_file() {
 }
 
 state_file=$(state_file_path)
+# When either line is out of date, the note asks for both, so that the pid line names the orchestrator's process
+# before its next /clear.
+write_both_lines="Run echo \$CLAUDE_CODE_SESSION_ID \$CLAUDE_PID, and write the session id that it prints on the session line of your state file, $state_file, and the process id on its pid line. Then continue the loop from the file, which follows."
 if [[ -n $session_id && -f $state_file ]]; then
   owner=$(state_field session)
   owner_process=$(state_field pid)
-  if [[ $owner == "$session_id" ]]; then
+  if [[ $owner == "$session_id" && (-z ${CLAUDE_PID:-} || $owner_process == "$CLAUDE_PID") ]]; then
     print_state_file "You are this repository's orchestrator. Continue the loop from your state file, $state_file, which follows."
+  elif [[ $owner == "$session_id" ]]; then
+    print_state_file "You are this repository's orchestrator, but the pid line of your state file doesn't hold the id of this Claude Code process, such as after claude --resume. $write_both_lines"
   elif [[ -n ${CLAUDE_PID:-} && $owner_process == "$CLAUDE_PID" ]]; then
-    print_state_file "You are this repository's orchestrator, and this session has a new id, such as after /clear. Write \"session: $session_id\" on the session line of your state file, $state_file, and continue the loop from the file, which follows."
+    print_state_file "You are this repository's orchestrator, and this session has a new id, such as after /clear. $write_both_lines"
   # LOOP_ROLE stays set for the life of the process, so only a session that starts takes over. Otherwise a successor
   # that compacts after a later successor took over would take the loop back.
   elif [[ ${LOOP_ROLE:-} == orchestrator && $event_source == startup ]]; then
-    print_state_file "You are this repository's new orchestrator. Write \"session: $session_id\" on the session line of the state file, $state_file, and continue the loop from the file, which follows."
+    print_state_file "You are this repository's new orchestrator. $write_both_lines"
   # A file that hasn't changed in a day most likely belongs to a loop that has stopped, so other sessions hear nothing.
   elif [[ -n $owner && -n $(find "$state_file" -mmin -1440 2>/dev/null) ]]; then
     echo "Session $owner runs this repository's loop as its orchestrator. Leave its issues, its branches and its state file, $state_file, alone, unless the orchestrator or a maintainer asks you to work on them."
