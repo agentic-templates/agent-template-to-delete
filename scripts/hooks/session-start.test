@@ -10,6 +10,12 @@ trap 'rm -rf "$base"' EXIT
 home=$base/home
 above=$home/work
 work=$above/repository
+# git looks for no repository above the temporary folder, reads none of the person's settings,
+# and commits as a stand-in person.
+export GIT_CEILING_DIRECTORIES=$base
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=Tester GIT_AUTHOR_EMAIL=tester@example.com
+export GIT_COMMITTER_NAME=Tester GIT_COMMITTER_EMAIL=tester@example.com
 
 # A stand-in for gh, first on the PATH, that reports the version in TEST_GH_VERSION.
 stand_in=$base/bin
@@ -56,8 +62,8 @@ new_folders() {
 # Arguments such as CLAUDE_CODE_REMOTE=true set more variables: run_session_start [<name>=<value>...]
 run_session_start() {
   hook_status=0
-  hook_output=$(cd "$work" && env -u CLAUDE_CODE_REMOTE -u CLAUDE_ENV_FILE HOME="$home" CLAUDECODE=1 PATH="$stand_in:$PATH" "$@" \
-    "$hooks_folder/session-start" <"$input_file") || hook_status=$?
+  hook_output=$(cd "$work" && env -u CLAUDE_CODE_REMOTE -u CLAUDE_ENV_FILE -u CLAUDE_PID -u LOOP_ROLE HOME="$home" CLAUDECODE=1 \
+    PATH="$stand_in:$PATH" "$@" "$hooks_folder/session-start" <"$input_file") || hook_status=$?
 }
 
 # Checks the hook's output: expect_output <description> <text the output holds, or "" for no output>
@@ -253,5 +259,138 @@ if ((hook_status != 0)); then
 fi
 expect_output "With CLAUDE_CODE_REMOTE=true and an install that fails" "The check tools shellcheck, actionlint and zizmor are missing"
 expect_install "With CLAUDE_CODE_REMOTE=true and an install that fails" called ""
+
+# The orchestrator's state file. The stand-in repository isn't a git repository, so the hook takes the state file from
+# .loop in the working folder.
+state_file=$work/.loop/state.md
+state_text="Ship the importer."
+owner_note="You are this repository's orchestrator. Continue the loop from your state file, $state_file, which follows."
+other_note="Session owner-1 runs this repository's loop as its orchestrator. Leave its issues, its branches and its state file, $state_file, alone, unless the orchestrator or a maintainer asks you to work on them."
+
+# Gives the working folder a state file for the session owner-1, in the Claude Code process 4242: new_state_file
+new_state_file() {
+  new_folders
+  mkdir -p "$work/.loop"
+  printf '# Loop state\n\nsession: owner-1\npid: 4242\n\n## Next\n%s\n' "$state_text" >"$state_file"
+}
+
+for source in startup resume clear compact; do
+  new_state_file
+  echo "{\"source\": \"$source\", \"session_id\": \"owner-1\"}" >"$input_file"
+  run_session_start
+  expect_output "With the source $source, for the session on the state file's session line" "$owner_note"$'\n\n'"# Loop state"
+  expect_output "With the source $source, for the session on the state file's session line" "$state_text"
+done
+
+new_state_file
+echo '{"source": "compact", "session_id": "owner-1"}' >"$input_file"
+run_session_start CLAUDE_PID=4242
+expect_output "For the session and the process on the state file's lines" "$owner_note"
+expect_output_without "For the session and the process on the state file's lines" "Write \"session:"
+
+new_state_file
+echo '{"source": "clear", "session_id": "new-2"}' >"$input_file"
+run_session_start CLAUDE_PID=4242
+expect_output "After /clear, for the process on the state file's pid line" \
+  "You are this repository's orchestrator, and this session has a new id, such as after /clear. Write \"session: new-2\" on the session line of your state file, $state_file, and continue the loop from the file, which follows."
+expect_output "After /clear, for the process on the state file's pid line" "$state_text"
+
+new_state_file
+echo '{"source": "clear", "session_id": "new-2"}' >"$input_file"
+run_session_start CLAUDE_PID=9999
+expect_output "After /clear, for another process than the state file's" "$other_note"
+expect_output_without "After /clear, for another process than the state file's" "$state_text"
+
+new_state_file
+printf 'session: owner-1\n\n%s\n' "$state_text" >"$state_file"
+echo '{"source": "clear", "session_id": "new-2"}' >"$input_file"
+run_session_start CLAUDE_PID=4242
+expect_output "After /clear, with a state file that has no pid line" "$other_note"
+expect_output_without "After /clear, with a state file that has no pid line" "$state_text"
+
+new_state_file
+echo '{"source": "startup", "session_id": "successor-3"}' >"$input_file"
+run_session_start LOOP_ROLE=orchestrator
+expect_output "At the start of a successor" \
+  "You are this repository's new orchestrator. Write \"session: successor-3\" on the session line of the state file, $state_file, and continue the loop from the file, which follows."
+expect_output "At the start of a successor" "$state_text"
+
+new_state_file
+echo '{"source": "compact", "session_id": "successor-3"}' >"$input_file"
+run_session_start LOOP_ROLE=orchestrator
+expect_output "After a compaction of a successor that didn't write its session id" "$other_note"
+expect_output_without "After a compaction of a successor that didn't write its session id" "$state_text"
+
+for source in startup compact; do
+  new_state_file
+  echo "{\"source\": \"$source\", \"session_id\": \"someone-else\"}" >"$input_file"
+  run_session_start
+  expect_output "With the source $source, for another session" "$other_note"
+  expect_output_without "With the source $source, for another session" "$state_text"
+done
+
+new_state_file
+touch -t 202001010000 "$state_file"
+echo '{"source": "startup", "session_id": "someone-else"}' >"$input_file"
+run_session_start
+expect_output "For another session, with a state file that changed more than a day ago" ""
+
+new_state_file
+printf '# Loop state\n\n%s\n' "$state_text" >"$state_file"
+echo '{"source": "startup", "session_id": "someone-else"}' >"$input_file"
+run_session_start
+expect_output "For another session, with a state file that has no session line" ""
+
+new_state_file
+run_session_start
+expect_output "With a state file, and no session id in the input" ""
+
+new_folders
+echo '{"source": "startup", "session_id": "owner-1"}' >"$input_file"
+run_session_start
+expect_output "Without a state file" ""
+
+# The hook prints at most 8,000 bytes of the file. The file of 8,000 bytes ends with "last", and the longer one adds "Z".
+new_state_file
+{
+  printf 'session: owner-1\n'
+  printf '%*s' 7979 '' | tr ' ' x
+  printf 'last'
+} >"$state_file"
+echo '{"source": "startup", "session_id": "owner-1"}' >"$input_file"
+run_session_start
+expect_output "With a state file of 8,000 bytes" "xlast"
+expect_output_without "With a state file of 8,000 bytes" "The file has"
+printf 'Z' >>"$state_file"
+run_session_start
+expect_output "With a state file of 8,001 bytes" \
+  "$owner_note"$'\n'"The file has 8001 bytes, and this hook prints only the first 8000. Read the rest of it from $state_file."
+expect_output "With a state file of 8,001 bytes" "xlast"
+expect_output_without "With a state file of 8,001 bytes" "lastZ"
+
+# In a worktree, the hook reads the state file of the main checkout, which holds the .git folder.
+new_state_file
+main_checkout=$base/main
+git init --quiet "$main_checkout"
+git -C "$main_checkout" commit --quiet --allow-empty -m "Start"
+mkdir -p "$main_checkout/.loop"
+printf 'session: owner-1\n\nThe state in the main checkout.\n' >"$main_checkout/.loop/state.md"
+rm -rf "$work"
+git -C "$main_checkout" worktree add --quiet --detach "$work"
+echo '{"source": "compact", "session_id": "owner-1"}' >"$input_file"
+run_session_start
+expect_output "In a worktree" "your state file, $main_checkout/.loop/state.md, which follows."
+expect_output "In a worktree" "The state in the main checkout."
+rm -rf "$main_checkout"
+
+# A repository whose .git folder is elsewhere keeps the state file in its own folder.
+new_state_file
+rm -rf "$work/.git"
+git init --quiet --separate-git-dir "$base/elsewhere.git" "$work"
+echo '{"source": "compact", "session_id": "owner-1"}' >"$input_file"
+run_session_start
+expect_output "With the .git folder outside the repository" "$owner_note"
+expect_output "With the .git folder outside the repository" "$state_text"
+rm -rf "$base/elsewhere.git"
 
 finish_tests
